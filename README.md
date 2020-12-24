@@ -9,7 +9,8 @@
     It then reads the top ccf dials for the starting position. Next, it looks at the 2cf dial and keeps track of the
     position and revolutions to report the cumulative cubic feet used.
 
-    The take_picture method should return a cropped grayscale photo of the meter display (see example photo)
+    The take_picture method should return a cropped grayscale photo of the meter display. The example photo contains an
+    example of the source image of my setup.
 
     For debugging, if it is run on a system without the camera, it will instead use a series of photos instead
     The series can be created by enabling saveImages.
