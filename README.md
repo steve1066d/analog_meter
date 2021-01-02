@@ -1,4 +1,4 @@
-# analog_meter: Reads an AC-250 gas meter by monitoring the 2cfm dial
+# analog_meter: Reads an AC-250 gas meter by monitoring the 1cfm dial
     by Steve Devore steve1066d@yahoo.com
 
     I'm using a Raspberry PI, with the HQ camera (HQ because I needed a lens that could be mounted close to the meter).
