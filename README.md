@@ -6,7 +6,7 @@
     and save the dial positions. I got more consistent results only looking for the dials one time, as opencv doesn't
     exactly line up the circles between shots.
 
-    It then reads the top ccf dials for the starting position. Next, it looks at the 2cf dial and keeps track of the
+    It then reads the top ccf dials for the starting position. Next, it looks at the 1cf dial and keeps track of the
     position and revolutions to report the cumulative cubic feet used.
 
     The take_picture method should return a cropped grayscale photo of the meter display. The example photo contains an
