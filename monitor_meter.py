@@ -1,5 +1,5 @@
 """ Web service that that reads a gas meter, and returns the the usage and rate
-    Also has an option to take a picture
+    Also has an option to return last image
 
 It returns the following as a json object:
         ccf:  100 cubic feet cumulative
@@ -18,9 +18,8 @@ import time
 import traceback
 import sys
 import cv2
+import logging
 
-clientMap = {}
-startTime = time.time()
 
 kwhCost = 0.1165
 thermCost = 0.6698
@@ -35,9 +34,66 @@ cfh2kWh = 3.250
 kwhCompare = thermsToKwh * kwhCost / thermCost * .9
 
 class MeterServer(BaseHTTPRequestHandler):
+    def _json(self):
+        global meter
+        cf = meter.cf
+        cfh = meter.cfh
+        ccf = cf / 100.0
+        kw = cfh * cfh2kWh
+        kwh = ccf * thermCorrection * thermsToKwh
+        val = {
+            "ccf": round(ccf, 3),
+            "cfh": round(cfh, 1),
+            "kW": round(kw, 1),
+            "kWh": round(kwh, 1),
+            "cost_kW": round(kw / kwhCompare, 1),
+            "cost_kWh": round(kwh / kwhCompare, 1),
+            "cost_hr": round(cfh * thermCorrection * thermCost / 100, 2),
+            "cost": round(ccf * thermCorrection * thermCost, 2)
+        }
+        return val
+
+    def mjpg(self):
+        self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=--jpgboundary')
+        self.end_headers()
+
+        lastImg = None
+        while True:
+            img = meter.last_image
+            if (id(lastImg) != id(img)):
+                lastImg = img;
+                ret, data = cv2.imencode('.jpg', img)
+
+                self.wfile.write(bytes("--jpgboundary", "utf8"))
+                self.send_header('Content-type', 'image/jpeg')
+                self.send_header('Content-length', len(data))
+                self.end_headers()
+                self.wfile.write(data)
+                self.send_response(200)
+            time.sleep(.1)
+
+    def html(self):
+        global meter
+        html = f"""
+    <html>
+    <body>
+    <head><title>Gas Meter</title></header>
+    <h1>Gas Meter</h1>
+    <img src="/image.mjpg" width="400">
+    <br>
+    <h3>CCF dial read</h3>
+    {meter.read_ccf()}
+    <br>
+    <h3>Current Values</h3>
+    <br>
+    {self._json()}
+    </body> """
+        return html.encode("utf8")
 
     def _set_headers(self):
-        if self.path.endswith("image") or self.path.endswith("find_circles"):
+        if self.path.endswith(".mjpg"):
+            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=--jpgboundary')
+        elif self.path.endswith("image") or self.path.endswith("find_circles"):
             self.send_header('Content-type', 'image/jpeg')
         elif self.path.endswith("ccf") or self.path.endswith("json"):
             self.send_header('Content-type', 'application/json')
@@ -45,66 +101,35 @@ class MeterServer(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/html')
         self.end_headers()
 
+    def log_message(self, format, *args):
+        return
+
     def do_GET(self):
-        global meter, clientMap, startTime
+        global meter
         self.send_response(200)
-        if self.path.endswith("image"):
-            image = meter.take_picture()
-            ret, data = cv2.imencode('.jpg', image)
-        elif self.path.endswith("ccf"):
-            # Reads the actual dials to determine cumulative use.  The other method just returns usage
-            # since the process was started
-            image = meter.take_picture()
-            value = {"ccf" : meter.read_ccf(image)}
-            data = json.dumps(value).encode("utf8")
-        elif self.path.endswith("json"):
-
-            ip = self.client_address[0]
-            val = clientMap.get(ip, (startTime, meter.starting))
-            newTime = time.time()
-            # Wait at least 55 seconds before returning new value.  Home assistant likes reading every 30 seconds,
-            # but every minute results in smoother usage numbers
-            if val[0] + 55 > newTime:
-                cf = val[1]
+        try:
+            if self.path.endswith('.mjpg'):
+                self.mjpg()
+            elif self.path.endswith("image"):
+                ret, data = cv2.imencode('.jpg', meter.last_image)
+            elif self.path.endswith("ccf"):
+                # Reads the actual dials to determine cumulative use.  The other method just returns usage
+                # since the process was started
+                value = {"ccf" : meter.read_ccf()}
+                data = json.dumps(value).encode("utf8")
+            elif self.path.endswith("json"):
+                val = self._json();
+                data = json.dumps(val).encode("utf8")
+            elif self.path.endswith("find_circles"):
+                image = meter.find_circles(image)
+                ret, data = cv2.imencode('.jpg', image)
             else:
-                cf = meter.cf
-                clientMap[ip] = (newTime, cf)
-            cfh = (cf - val[1]) / (newTime - val[0]) * 60.0 * 60.0
-            ccf = cf / 100.0
-            kw = cfh * cfh2kWh
-            kwh = ccf * thermCorrection * thermsToKwh
-            val = {
-                "ccf" : round(ccf, 3),
-                "cfh" : round (cfh, 1),
-                "kW" : round (kw, 1),
-                "kWh" : round(kwh, 1),
-                "cost_kW" : round(kw / kwhCompare, 1),
-                "cost_kWh" : round(kwh / kwhCompare, 1),
-                "cost_hr" : round(cfh * thermCorrection * thermCost / 100, 2),
-                "cost" : round(ccf * thermCorrection * thermCost, 2)
-            }
-            data = json.dumps(val).encode("utf8")
-        elif self.path.endswith("find_circles"):
-            image = meter.take_picture()
-            image = meter.find_circles(image)
-            ret, data = cv2.imencode('.jpg', image)
-        else:
-            html = """
-<html>
-<body>
-<head><title>Gas Meter</title></header>
-<h1>Gas Meter</h1>
-<iframe src="/ccf"></iframe>
-<br>
-<img src="/image" width="400">
-<br>
-<iframe src="/json">
-</body> """
-            data = html.encode("utf8")
-
-        self.send_header('Content-length', str(len(data)))
-        self._set_headers()
-        self.wfile.write(data)
+                data = self.html()
+            self.send_header('Content-length', str(len(data)))
+            self._set_headers()
+            self.wfile.write(data)
+        except ConnectionAbortedError:
+            return
 
     def do_HEAD(self):
         self.send_response(200)
@@ -113,12 +138,12 @@ class MeterServer(BaseHTTPRequestHandler):
 httpd = HTTPServer(("", 8000), MeterServer)
 meter.start()
 if (meter.on_pi):
-    print("Started meter reading")
+    logging.info("Started meter reading")
 else:
-    print("Started emulated reading")
+    logging.info("Started emulated reading")
 try:
     httpd.serve_forever()
 except KeyboardInterrupt:
     pass
 httpd.server_close()
-print("Server stopped.")
+logging.info("Server stopped.")

@@ -6,7 +6,7 @@
     and save the dial positions. I got more consistent results only looking for the dials one time, as opencv doesn't
     exactly line up the circles between shots.
 
-    It then reads the top ccf dials for the starting position. Next, it looks at the 2cf dial and keeps track of the
+    It then reads the top ccf dials for the starting position. Next, it looks at the 1cf dial and keeps track of the
     position and revolutions to report the cumulative cubic feet used.
 
     The take_picture method should return a cropped grayscale photo of the meter display (see example photo)
@@ -25,23 +25,29 @@ from os import path
 import threading
 import json
 from datetime import datetime
+from collections import deque
+import logging
 
-debug = True
-""" If this is true, it will display various images to show how it is working """
+logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', level=logging.DEBUG)
 
 secondsBetweenPictures = 2
 """ The time to wait between images """
 
-saveImages = False
+saveImages = True
 """ If images should be saved for debugging purposes """
 
 cf = 0
 """ The number of cubic feet on the meter """
+
+cfh = 0
+"""" The current cubic feet per hour """
+
 starting = 0
 """ The number of cubic feet that was on the meter when the app was first started """
 
 _file_id = 1000
 _camera_lock = threading.Lock()
+_readings = deque()
 
 try:
     from picamera.array import PiRGBArray
@@ -112,7 +118,7 @@ def findangle(img, slices=200, min = 0, max = 360):
         if count < match_count:
             match_count = count
             match_angle = angle
-    if debug:
+    if logging.DEBUG >= logging.root.level:
         imgc = cv2.ellipse(img, axes, axes, match_angle, -half_arc, half_arc, 255, thickness=-1)
         debug_image("findangle", imgc)
     return match_angle
@@ -132,11 +138,12 @@ def debug_image(name, img):
     cv2.imshow(name, img)
 
 
-def find_circles(img):
+def find_circles():
     """ It turns out that the camera is more stable than the algorythm to find the dials.  So this is just
         used on demand to get the coordinates, and then its saved.
     """
-    global _circles
+    global _circles, last_image
+    img = last_image;
 
     original = img
 #
@@ -154,7 +161,7 @@ def find_circles(img):
         _circles = np.round(circles[0, :]).astype("int")
         for (x, y, r) in _circles:
             cv2.circle(original, (x, y), r, (0, 255, 0), 4)  # debug
-            print("radius: %d adj: %d,  " % (r, r / scale))
+            logging.debug("radius: %d adj: %d,  " % (r, r / scale))
         with open('settings.json', 'w') as outfile:
             json.dump(np.ndarray.tolist(_circles), outfile)
     return original
@@ -171,7 +178,7 @@ def get_circle(circles, pos, img):
     if pos > 3:
         pos -= 4
     x, y, r = circles[pos]
-    if debug:
+    if logging.DEBUG >= logging.root.level:
         cv2.circle(img, (x, y), r, 0, 4)  # debug
         debug_image("circles", img)
     # get the last dial on the bottom row
@@ -198,7 +205,7 @@ def read_dial(img):
     position = findangle(thresh)
     # determine angle, between 0 and 10, with 0 at the top
     position = (position / 36 + 2.5) % 10
-    if debug:
+    if logging.DEBUG >= logging.root.level:
         img = output.copy()
         color = (0, 0, 255)
         cv2.putText(img, ("%.1f" % position), (int(r / 2), r), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2,
@@ -207,22 +214,23 @@ def read_dial(img):
     return position
 
 
-def read2cf(img):
+def read1cf():
     """ Reads the 2 cf dial of a gas meter
     :param img:  image is roughly that of the cropped view of the meter panel
     :return:  position between 0 and < 10 going clockwise
     """
-    return _read_meter(img, True)
+    return _read_meter(True)
 
 
-def read_ccf(img):
+def read_ccf():
     """ Reads the top ccf dials of the meter.
     """
-    return _read_meter(img, False)
+    return _read_meter(False)
 
 
-def _read_meter(img, rate):
-    global _circles
+def _read_meter(rate):
+    global _circles, last_image
+    img = last_image
 
     # find the dials
     position = -1
@@ -251,7 +259,7 @@ def _read_meter(img, rate):
     return position
 
 def take_picture():
-    global _camera_lock, last_file, _file_id
+    global _camera_lock, last_file, _file_id, last_image
     _camera_lock.acquire()
     try:
         if on_pi:
@@ -259,11 +267,12 @@ def take_picture():
             image = rawCapture.array
             rawCapture.truncate(0)
             if saveImages:
-                cv2.imwrite("%d.jpg" % file_id, image)
+                cv2.imwrite("%d.jpg" % _file_id, image)
         else:
             last_file = "c:/meter/images/%d.jpg" % _file_id
             image = cv2.imread(last_file)
             if image is None:
+                logging.info("End of images")
                 exit(0)
         _file_id += 1
     finally:
@@ -271,7 +280,30 @@ def take_picture():
     points = np.array([(32, 74), (1132,45), (1165, 651), (49, 718)])
     image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     image = four_point_transform(image, points)
+    last_image = image;
     return image;
+
+def calc_cfh(time, current):
+    """ Calculates the cfh using the most recent measure from at least 30 seconds ago """""
+    global cf, cfh
+    if len(_readings) > 0:
+        find_time = time - 30
+        while len(_readings) > 1:
+            (beginTime, beginCf) = _readings[1]
+            if beginCf == cf or beginTime >= find_time:
+                break;
+            _readings.popleft()
+        (beginTime, beginCf) = _readings[0]
+        change = cf + current - beginCf
+        _cfh = change / (time - beginTime) * 60 * 60
+        if _cfh > 100:
+            cv2.imwrite("%d.jpg" % _file_id, image)
+            logging.warning("warning: cf over 100 %.1f", _cfh)
+            return;
+        cfh = _cfh
+        logging.info("calc:", time - beginTime , current, change, len(_readings), cfh)
+    cf += current
+    _readings.append((time, cf))
 
 def run():
     """ Periodically takes a picture and calculates the new cf value """
@@ -279,8 +311,8 @@ def run():
     last_meter_pos = 0
     current = 0
     cfm = 0
-    global cf
-    print("cf is: ",cf)
+    global cf, cfh
+    logging.info(f"cf is: {cf}")
     while True:
         timer = time.time()
         image = take_picture()
@@ -290,41 +322,40 @@ def run():
         else:
             path = pathlib.Path(last_file)
             new_time = path.stat().st_mtime
-            if debug:
-                print(last_file, datetime.fromtimestamp(new_time))
+            logging.debug(f'{last_file}, {datetime.fromtimestamp(new_time)}')
 
-        position = read2cf(image)
-        meter_pos = np.interp(position, [0, 10], [2, 0])
+        position = read1cf()
+        meter_pos = np.interp(position, [0, 10], [1, 0])
         new_pos = meter_pos
-        if (new_pos + 1) <= last_meter_pos:
-            new_pos += 2
+        if (new_pos + .5) <= last_meter_pos:
+            new_pos += 1
         skip = False
         if last_time == 0:
             last_time = new_time
             last_meter_pos = new_pos
-        # Only consider it a new value if it is at last .1 cf over previous value
-        # (prevents a stationary dial from reading as having done almost a full revolution)
-        if new_pos > last_meter_pos:
+        # Allow only revolutons
+        if new_pos > last_meter_pos and new_pos <  last_meter_pos + .5:
             if last_time != 0:
                 current = (new_pos - last_meter_pos)
-                cfm = current / (new_time - last_time) * 60
-                # if we get over 10 cfm, it must be because there was a dial misread.. Ignore it and wait for
-                # something better
-                if cfm > 10:
-                    skip = True
-                    print("skipping... %.1f" % position)
-            if not skip:
-                print("pos: %.1f, elapsed: %.1f, cf: %.1f, cfm: %.1f" % (position, (new_time - last_time), cf, cfm))
-                cf += current
+                calc_cfh(new_time, current)
+                logging.info("pos: %.1f, elapsed: %.2f, cf: %.2f, cfh: %.2f" % (position, (new_time - last_time), cf, cfh))
                 last_time = new_time
                 last_meter_pos = meter_pos
-        if debug:
+        if logging.DEBUG >= logging.root.level:
             key = cv2.waitKey(int(secondsBetweenPictures * 1000))
             if key == 27:  # exit on esc
                 exit(0)
         else:
             time.sleep(secondsBetweenPictures)
         sys.stdout.flush()
+
+def runContinuous():
+    while(True):
+        try:
+            run()
+        except Exception as e:
+            track = traceback.format_exc()
+        logging.warn(track)
 
 def initialize():
     global _circles, cf, starting
@@ -333,18 +364,17 @@ def initialize():
         with open('settings.json') as json_file:
             _circles = np.array(json.load(json_file))
     else:
-        find_circles(image)
-    cf = read_ccf(image) * 100
+        find_circles()
+    cf = read_ccf() * 100
     starting = cf
-    print("initialized: ", cf)
+    logging.info(f'initialized: {cf}')
 
 def start():
     """ Start processing in the background """
-    global debug
     # never run in debug if it is run as a daemon process
-    debug = False
+    logging.root.setLevel(logging.INFO)
     initialize()
-    threading.Thread(target=run, args=(), daemon=True).start()
+    threading.Thread(target=runContinuous, args=(), daemon=True).start()
 
 
 if __name__ == "__main__":
